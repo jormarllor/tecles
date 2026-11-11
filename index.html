@@ -121,7 +121,10 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-acti
     <h2>Peces <button class="close" data-close>Tanca</button></h2>
     <div class="rows" id="songList"></div>
     <label class="upload">Puja una partitura<input type="file" id="file" accept=".mid,.midi,.musicxml,.xml,.mxl"></label>
-    <p class="note">Formats: MIDI (.mid) i MusicXML (.musicxml, .mxl). Si tens la partitura en PDF, obre-la amb MuseScore i exporta-la a MusicXML. Les peces pujades es guarden només en aquest mòbil.</p>
+    <p class="note">Formats: MIDI (.mid) i MusicXML (.musicxml, .mxl). Si tens la partitura en PDF, obre-la amb MuseScore i exporta-la a MusicXML.</p>
+    <h3>Sincronització</h3>
+    <p class="note" id="syncText">Connectant amb el núvol…</p>
+    <button class="btn" id="syncBtn" hidden>Entra amb Google</button>
   </div>
 </div>
 
@@ -345,6 +348,71 @@ function saveUserSongs(){
 }
 store.get('tecles.songs',[]).forEach(s=>{try{SONGS.push(finishSong({id:s.id,user:true,title:s.title,sub:s.sub,barLen:s.barLen,pickup:s.pickup,notes:s.n.map(a=>({m:a[0],t:a[1],d:a[2],h:a[3]}))}));}catch(e){}});
 
+/* ---------- Sincronització (Firebase, mateix projecte que l'eina de tasques) ---------- */
+const firebaseConfig={
+  apiKey:"AIzaSyCkjjtjsc5DDGM-144U3C-oH3m-6r95J2Q",
+  authDomain:"tasques-48cb9.firebaseapp.com",
+  projectId:"tasques-48cb9",
+  storageBucket:"tasques-48cb9.firebasestorage.app",
+  messagingSenderId:"264203112506",
+  appId:"1:264203112506:web:ef3ffb7068934f8fd96503"
+};
+const CLOUD={ready:false,failed:false,uid:null,email:'',fs:null,db:null,authM:null,auth:null,first:true,unsub:[]};
+const packSong=s=>({title:s.title,sub:s.sub,barLen:s.barLen,pickup:s.pickup,n:JSON.stringify(s.notes.map(n=>[n.m,+n.t.toFixed(3),+n.d.toFixed(3),n.h]))});
+const unpackSong=(id,d)=>finishSong({id,user:true,title:d.title,sub:d.sub,barLen:d.barLen,pickup:d.pickup,notes:JSON.parse(d.n).map(a=>({m:a[0],t:a[1],d:a[2],h:a[3]}))});
+const colP=()=>CLOUD.fs.collection(CLOUD.db,'usuaris',CLOUD.uid,'partitures');
+const docP=()=>CLOUD.fs.doc(CLOUD.db,'usuaris',CLOUD.uid,'config','tecles');
+function cloudPut(s){if(CLOUD.uid)CLOUD.fs.setDoc(CLOUD.fs.doc(colP(),s.id),packSong(s)).catch(()=>toast('No s\'ha pogut sincronitzar la partitura. Comprova la connexió.'));}
+function cloudDel(s){if(CLOUD.uid)CLOUD.fs.deleteDoc(CLOUD.fs.doc(colP(),s.id)).catch(()=>{});}
+function cloudProgress(){if(CLOUD.uid)CLOUD.fs.setDoc(docP(),{progress:JSON.stringify(progress)}).catch(()=>{});}
+function cloudListen(){
+  const fs=CLOUD.fs;
+  CLOUD.unsub.push(fs.onSnapshot(colP(),snap=>{
+    const cloud=[];snap.forEach(d=>{try{cloud.push(unpackSong(d.id,d.data()));}catch(e){}});
+    const ids=new Set(cloud.map(s=>s.id));
+    const localOnly=SONGS.filter(s=>s.user&&!ids.has(s.id));
+    const curId=G.song&&G.song.id;
+    for(let i=SONGS.length-1;i>=0;i--)if(SONGS[i].user)SONGS.splice(i,1);
+    cloud.sort((a,b)=>a.id<b.id?-1:1).forEach(s=>SONGS.push(s));
+    if(CLOUD.first){CLOUD.first=false;localOnly.forEach(s=>{SONGS.push(s);cloudPut(s);});}
+    saveUserSongs();
+    const cur=SONGS.find(s=>s.id===curId);
+    if(!cur)loadSong(SONGS[0]);else if(G.song.user)G.song=cur;
+    if(!$('lib').hidden)renderLib();
+  },()=>toast('No puc llegir les partitures del núvol.')));
+  CLOUD.unsub.push(fs.onSnapshot(docP(),d=>{
+    try{
+      const raw=d.exists()?d.data().progress||'{}':'{}',p=JSON.parse(raw);let ch=false;
+      for(const k in p){progress[k]=progress[k]||{};for(const j in p[k])if(p[k][j]&&!progress[k][j]){progress[k][j]=true;ch=true;}}
+      if(ch){store.set('tecles.progress',progress);renderSteps();}
+      if(JSON.stringify(progress)!==raw&&Object.keys(progress).length)cloudProgress();
+    }catch(e){}
+  },()=>{}));
+}
+function syncBox(){
+  const t=$('syncText'),b=$('syncBtn');
+  if(!CLOUD.ready){b.hidden=true;t.textContent=CLOUD.failed?'Sense connexió amb el núvol: ara les partitures es guarden només en aquest aparell.':'Connectant amb el núvol…';return;}
+  b.hidden=false;
+  if(CLOUD.uid){t.textContent='Sincronitzat amb '+CLOUD.email+'. Les partitures i el progrés apareixen a tots els aparells on entris amb aquest compte.';b.textContent='Tanca la sessió';}
+  else{t.textContent='Entra amb Google per veure les mateixes partitures al mòbil i a l\'ordinador. Sense sessió, es guarden només en aquest aparell.';b.textContent='Entra amb Google';}
+}
+async function cloudInit(){
+  try{
+    const base='https://www.gstatic.com/firebasejs/10.14.1/';
+    const [appM,authM,fs]=await Promise.all([import(base+'firebase-app.js'),import(base+'firebase-auth.js'),import(base+'firebase-firestore.js')]);
+    const app=appM.initializeApp(firebaseConfig);
+    CLOUD.authM=authM;CLOUD.auth=authM.getAuth(app);CLOUD.fs=fs;CLOUD.db=fs.getFirestore(app);CLOUD.ready=true;
+    authM.getRedirectResult(CLOUD.auth).catch(()=>{});
+    authM.onAuthStateChanged(CLOUD.auth,u=>{
+      CLOUD.unsub.forEach(f=>f());CLOUD.unsub=[];
+      CLOUD.uid=u?u.uid:null;CLOUD.email=u?(u.email||''):'';CLOUD.first=true;
+      if(u)cloudListen();
+      syncBox();
+    });
+  }catch(e){CLOUD.failed=true;}
+  syncBox();
+}
+
 /* ---------- So ---------- */
 let ac=null,master=null,soundOn=true;
 function audio(){
@@ -441,7 +509,7 @@ function finishRun(){
   const acc=G.mode==='wait'?G.hits/Math.max(1,G.hits+G.wrong):G.hits/Math.max(1,G.total+G.wrong);
   const ok=acc>=(G.mode==='wait'?.85:.75),s=G.song,pct=Math.round(acc*100);
   const pr=progress[s.id]=progress[s.id]||{};
-  if(ok){pr[G.step]=true;store.set('tecles.progress',progress);}
+  if(ok){pr[G.step]=true;store.set('tecles.progress',progress);cloudProgress();}
   const isStep=G.step>=0,last=G.step>=s.steps.length-1;
   $('resTitle').textContent=ok?(isStep?'Pas '+(G.step+1)+' dominat':'Peça dominada'):'Gairebé';
   $('resBig').textContent=pct+'%';
@@ -621,7 +689,7 @@ function renderLib(){
     const u=document.createElement('span');u.textContent=s.sub+(s.steps.length?' · '+done+' de '+s.steps.length+' passos':'');
     b.append(t,u);b.onclick=()=>{loadSong(s);$('lib').hidden=true;};row.appendChild(b);
     if(s.user){const d=document.createElement('button');d.className='del';d.textContent='✕';d.setAttribute('aria-label','Esborra '+s.title);
-      d.onclick=()=>{SONGS.splice(SONGS.indexOf(s),1);saveUserSongs();if(G.song===s)loadSong(SONGS[0]);renderLib();};row.appendChild(d);}
+      d.onclick=()=>{SONGS.splice(SONGS.indexOf(s),1);saveUserSongs();cloudDel(s);if(G.song===s)loadSong(SONGS[0]);renderLib();};row.appendChild(d);}
     box.appendChild(row);
   });
 }
@@ -657,15 +725,27 @@ $('resNext').onclick=e=>{
 $('file').onchange=async e=>{
   const f=e.target.files[0];e.target.value='';if(!f)return;
   try{
-    const s=await importFile(f);SONGS.push(s);
+    const s=await importFile(f);SONGS.push(s);cloudPut(s);
     const saved=saveUserSongs();
     loadSong(s);$('lib').hidden=true;
     toast(saved?'Partitura convertida: '+s.notes.length+' notes.':'Partitura convertida, però no s\'ha pogut guardar en aquest mòbil.');
   }catch(err){toast(err&&err.message?err.message:'No he pogut llegir aquest fitxer.');}
 };
+$('syncBtn').onclick=async()=>{
+  if(!CLOUD.ready)return;
+  const a=CLOUD.authM;
+  if(CLOUD.uid){a.signOut(CLOUD.auth);return;}
+  const p=new a.GoogleAuthProvider();p.setCustomParameters({prompt:'select_account'});
+  try{await a.signInWithPopup(CLOUD.auth,p);}
+  catch(e){
+    if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment'].includes(e.code))return a.signInWithRedirect(CLOUD.auth,p);
+    if(e.code!=='auth/popup-closed-by-user'&&e.code!=='auth/cancelled-popup-request')toast('No s\'ha pogut iniciar la sessió. Torna-ho a provar.');
+  }
+};
 new ResizeObserver(()=>layout()).observe($('stage'));
 loadSong(SONGS[0]);
 requestAnimationFrame(frame);
+cloudInit();
 </script>
 </body>
 </html>
